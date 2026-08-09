@@ -304,8 +304,8 @@ class EvoScientistConfig:
 
     # UI Settings
     show_thinking: bool = True
-    # "webui" launches the browser front-end (@evoscientist/webui via npx) +
-    # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
+    # "webui" launches the local WebUI submodule + a deploy-style langgraph
+    # server instead of the in-terminal CLI/TUI.
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     log_level: str = "warning"
     # Empty means use the provider/model default. A non-empty value is an

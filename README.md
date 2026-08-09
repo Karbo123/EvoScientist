@@ -1,3 +1,18 @@
+> ## 本地 fork 改动
+>
+> 本仓库始终基于官方 `upstream/main`，并且只领先官方 **一个本地 commit**。
+> 相比官方新增的功能和意图如下：
+>
+> - **本地 WebUI 子模块 + 启动/更新流程**：不再使用 npm 发布包，改为启动仓库内 `WebUI` 子模块；`./evosci.sh` 负责启动、停止、状态、重启和更新。更新时只拉取官方 `upstream/main`，把本地改动 rebase/squash 成一条提交，冲突时用 DeepSeek 自动解决。
+> - **分页对话历史**：打开会话时只加载最新 100 条，向上回滚时才从 SQLite 按页加载更早内容，避免超长历史一次性渲染导致卡顿。这纯粹是前端展示优化：历史仍完整保存在数据库中，送给大模型的 context 不受影响。
+> - **加载更早 + 滚动体验**：在底部时自动只显示最新 100 条；向上滚动出现 “Load earlier messages” 按钮，点击后按 100 条加载更早消息并保持滚动位置；右下角提供“回到最新消息”按钮。
+> - **WebUI 斜杠命令候选框**：输入以 `/` 开头的命令名（尚未输入空格）时弹出候选列表，展示后端所有已注册指令及其含义，支持 `Tab` 补全、`↑/↓` 选择和鼠标点击选择；指令目录由新增的 `GET /api/commands` 动态提供。
+> - **WSL/运行稳定性**：配置和 PID 路径遵循 `XDG_CONFIG_HOME`；提高 `/mnt/d` 冷启动超时；端口探测兼容残留 socket；工作区路径比较兼容 WSL 大小写不敏感挂载，让已有 project 能重新出现在 WebUI Recents。
+> - **WebUI 子代理渲染修复**：对 WebUI 使用的 `@langchain/langgraph-sdk 1.9.25` 应用 `patch-package` 补丁，避免并行子代理消息密集时触发 React #185；重装依赖时自动重放，最新上游 1.9.28 仍未修复。
+> - **启动懒加载 + 数据库索引**：模型供应商 SDK 与主/子 Agent 图都改为按需加载，首次实际调用时才构建并缓存；同时为 `checkpoints` 元数据建立覆盖索引、启动清理先做轻量探测，避免每次重启都全表扫描大量 BLOB，`./evosci.sh` 也改用轻量 WebUI 入口跳过完整 CLI 命令树，并让本地 `langgraph dev` 以 `--allow-blocking` 启动，避免首次在 ASGI 线程中懒建图时被 blockbuster 拦截为 500。实测后端 `Application started up` 从约 21.7s 降到 4.8s，完整 `./evosci.sh restart` 约 17.5s（剩余主要是 Next.js 冷启动）。
+>
+> 意图：在官方最新版本之上保持唯一一条本地提交，避免长对话造成前端卡顿，同时不删除历史、不缩短大模型上下文，并让 WSL2 下的 WebUI 启动更快、维护和更新更稳定。
+
 <div align="center">
     <picture>
       <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/logo-dark.svg">
@@ -432,7 +447,7 @@ EvoSci -p "your question"        # single-shot mode
 EvoSci --workdir /path/to/project # open in a specific directory
 EvoSci -m run                     # isolated per-session workspace
 EvoSci --ui cli                   # classic CLI (lightweight)
-EvoSci --ui webui                 # browser workspace UI (needs Node/npx)
+EvoSci --ui webui                 # browser workspace UI (needs local WebUI submodule)
 EvoSci serve                      # headless mode — channels only, no interactive prompt
 EvoSci deploy                     # standalone LangGraph server for external UIs / SDK clients
 EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream on stdout (for programmatic clients)
@@ -445,7 +460,7 @@ EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream 
 <details>
 <summary>Desktop WebUI</summary>
 
-Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) front-end in one terminal — no second process to manage:
+Set the UI backend to `webui` and a fresh `EvoSci` session launches a deploy-style LangGraph server **and** the locally checked-out `WebUI` submodule front-end in one terminal — no second process to manage:
 
 ```bash
 EvoSci config set ui_backend webui   # persist; or one-off with `EvoSci --ui webui`
@@ -453,7 +468,7 @@ EvoSci                               # opens http://localhost:4716
 EvoSci config set webui_port 4800    # change the front-end port (must differ from the langgraph dev port)
 ```
 
-Requires **Node.js 24 LTS** (for `npx`); the first launch downloads `@evoscientist/webui` and needs network. Note: the WebUI does not show your CLI/TUI chat history, and `-p` / `--resume` fall back to the classic CLI.
+Requires **Node.js 20+** and a built `WebUI` submodule (`./evosci.sh update` installs dependencies and builds it). Note: the WebUI does not show your CLI/TUI chat history, and `-p` / `--resume` fall back to the classic CLI.
 
 **Opening it from another machine.** Both servers bind loopback (`127.0.0.1`) by default, so the WebUI is local-only out of the box. To use it over the LAN, widen both — the UI connects to the backend **from the browser**, so also point the UI's deployment URL at `http://<this-machine-ip>:6174` rather than leaving it on localhost:
 

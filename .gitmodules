@@ -1,0 +1,3 @@
+[submodule "WebUI"]
+	path = WebUI
+	url = https://github.com/Karbo123/EvoScientist-WebUI.git

@@ -23,10 +23,11 @@ memory.
 from __future__ import annotations
 
 import asyncio
+import json
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
@@ -73,6 +74,24 @@ async def get_models(_request: Request) -> JSONResponse:
             "default": {"name": cfg.model, "provider": cfg.provider},
         }
     )
+
+
+async def get_commands(_request: Request) -> JSONResponse:
+    """Return the registered slash-command catalog for WebUI autocomplete.
+
+    Kept lazy so this route doesn't pull the command implementation modules
+    into the startup path; only the first ``/api/commands`` request pays for it.
+    """
+
+    def _load_commands() -> list[dict[str, str]]:
+        from EvoScientist.commands import manager
+
+        return [
+            {"name": name, "description": description}
+            for name, description in manager.list_commands()
+        ]
+
+    return JSONResponse(await asyncio.to_thread(_load_commands))
 
 
 async def get_teams(_request: Request) -> JSONResponse:
@@ -132,9 +151,139 @@ async def get_teams(_request: Request) -> JSONResponse:
     return JSONResponse({"teams": teams})
 
 
+def _interrupt_payload(value: object) -> object:
+    """Convert LangGraph ``Interrupt`` tuples into JSON-friendly objects."""
+    if not isinstance(value, list):
+        return value
+    result = []
+    for item in value:
+        if item is None or isinstance(item, dict):
+            result.append(item)
+        else:
+            result.append(
+                {
+                    "value": getattr(item, "value", None),
+                    "id": getattr(item, "id", None),
+                }
+            )
+    return result
+
+
+async def _latest_thread_values(thread_id: str, db_path: str | None = None) -> dict:
+    """Return the non-message state values stored in the latest checkpoint."""
+    from EvoScientist.sessions import (
+        MAIN_THREAD_FILTER_PARAMS,
+        MAIN_THREAD_FILTER_SQL,
+        _table_exists,
+        get_db_path,
+    )
+
+    try:
+        import aiosqlite
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+        db_path = db_path or str(get_db_path())
+        async with aiosqlite.connect(db_path, timeout=30.0) as conn:
+            if not await _table_exists(conn, "checkpoints"):
+                return {}
+            query = (
+                "SELECT checkpoint_id, type, checkpoint FROM checkpoints "
+                "WHERE thread_id = ? AND checkpoint_ns = '' "
+                f"  AND {MAIN_THREAD_FILTER_SQL} "
+                "ORDER BY checkpoint_id DESC LIMIT 1"
+            )
+            async with conn.execute(
+                query, (thread_id, *MAIN_THREAD_FILTER_PARAMS)
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None or row[0] is None or row[1] is None:
+                return {}
+            checkpoint = JsonPlusSerializer().loads_typed((row[1], row[2]))
+            values = checkpoint.get("channel_values") or {}
+            result = {
+                key: values[key]
+                for key in (
+                    "todos",
+                    "files",
+                    "async_tasks",
+                    "email",
+                    "ui",
+                    "_summarization_event",
+                    "__interrupt__",
+                )
+                if key in values
+            }
+            if "__interrupt__" in result:
+                result["__interrupt__"] = _interrupt_payload(result["__interrupt__"])
+            else:
+                async with conn.execute(
+                    "SELECT type, value FROM writes "
+                    "WHERE thread_id = ? AND checkpoint_ns = '' "
+                    "  AND checkpoint_id = ? AND channel = '__interrupt__' "
+                    "ORDER BY task_id, idx",
+                    (thread_id, row[0]),
+                ) as cur:
+                    interrupt_rows = await cur.fetchall()
+                if interrupt_rows:
+                    interrupts = []
+                    serde = JsonPlusSerializer()
+                    for typ, blob in interrupt_rows:
+                        if typ is None or blob is None:
+                            continue
+                        value = serde.loads_typed((typ, blob))
+                        if isinstance(value, list):
+                            interrupts.extend(value)
+                        else:
+                            interrupts.append(value)
+                    result["__interrupt__"] = _interrupt_payload(interrupts)
+            return result
+    except Exception:
+        return {}
+
+
+async def get_thread_messages_page(request: Request) -> Response:
+    """Return one page of a thread's messages read directly from SQLite."""
+    from EvoScientist.sessions import get_db_path, get_thread_messages
+
+    thread_id = request.query_params.get("thread_id", "").strip()
+    if not thread_id:
+        return JSONResponse({"error": "thread_id is required"}, status_code=400)
+    try:
+        limit = int(request.query_params.get("limit", "100"))
+    except ValueError:
+        limit = 100
+    limit = max(1, min(limit, 500))
+
+    raw_offset = request.query_params.get("offset")
+    try:
+        offset = int(raw_offset) if raw_offset is not None else None
+    except ValueError:
+        offset = None
+
+    # get_db_path() may mkdir the data dir; blockbuster forbids that syscall on
+    # the async event loop, so resolve the path in a worker thread first.
+    db_path = await asyncio.to_thread(lambda: str(get_db_path()))
+    messages = await get_thread_messages(thread_id, db_path=db_path)
+    total = len(messages)
+    start = total - limit if offset is None else offset
+    start = max(0, min(start, total))
+    page = messages[start : start + limit]
+    payload = {
+        "messages": [message.model_dump() for message in page],
+        "values": await _latest_thread_values(thread_id, db_path=db_path),
+        "offset": start,
+    }
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, default=str),
+        media_type="application/json",
+    )
+
+
 app = Starlette(
     routes=[
         Route("/api/models", get_models, methods=["GET"]),
+        Route("/api/commands", get_commands, methods=["GET"]),
         Route("/api/teams", get_teams, methods=["GET"]),
+        Route("/api/threads/messages", get_thread_messages_page, methods=["GET"]),
     ]
 )

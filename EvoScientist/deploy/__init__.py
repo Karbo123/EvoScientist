@@ -11,12 +11,19 @@ deploy mode does NOT load an in-process CLI agent, session DB, channel
 runtime, or TUI — those are all TUI / serve concerns. Deploy only
 manages the lifecycle of the langgraph dev subprocess (and ccproxy if
 OAuth is configured).
+
+``server`` is imported lazily so the WebUI launcher can avoid pulling in
+the full CLI command tree during startup.
 """
 
 from __future__ import annotations
 
-# Importing the server submodule registers the ``@app.command()`` decorator
-# on the shared Typer ``app`` from ``EvoScientist.cli._app``.
-from . import server
+from importlib import import_module
 
 __all__ = ["server"]
+
+
+def __getattr__(name: str):
+    if name == "server":
+        return import_module(f"{__name__}.server")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

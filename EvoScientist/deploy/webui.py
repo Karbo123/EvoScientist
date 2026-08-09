@@ -3,11 +3,11 @@
 Selected via ``ui_backend = "webui"`` (onboard → "Select UI mode" → WebUI).
 Running ``EvoSci`` then becomes, in ONE terminal:
 
-    EvoSci deploy  +  npx @evoscientist/webui
+    EvoSci deploy  +  node WebUI/bin/evoscientist-webui.mjs
 
 i.e. start a *full* langgraph dev server (MCP + async sub-agents, exactly like
-``EvoSci deploy``) AND launch the published ``@evoscientist/webui`` Next.js
-front-end via ``npx``, so the user never needs two terminals.
+``EvoSci deploy``) AND launch the locally checked-out WebUI Next.js front-end
+from the ``WebUI`` git submodule, so the user never needs two terminals.
 
 Design boundary: this module deliberately REUSES the low-level
 ``start_langgraph_dev`` primitive but does **not** import, call, or modify the
@@ -15,11 +15,10 @@ Design boundary: this module deliberately REUSES the low-level
 server for *external* consumers (deep-agents-ui, agent-chat-ui, LangSmith
 Studio, SDK clients); WebUI mode is a separate, parallel launcher.
 
-``npx @evoscientist/webui@latest`` is used (not a pinned version) so each launch
-transparently pulls the newest published UI — front-end fixes ship to users
-without touching the EvoScientist install. The trade-off: the first launch (and
-the first launch after a new release) downloads the package and needs network;
-subsequent launches reuse the npm cache.
+The ``WebUI`` submodule is used instead of the published npm package so local
+UI fixes (e.g. rendering only the latest N messages) live in real source files.
+``./evosci.sh update`` fetches, rebases and rebuilds that submodule; the launcher
+here only starts the built ``dist/server.js`` through the package's own bin.
 """
 
 from __future__ import annotations
@@ -39,10 +38,18 @@ from rich.text import Text
 
 from ..stream.console import console
 
-# Front-end npm package + spec. ``@latest`` → always the newest published UI.
-_WEBUI_PACKAGE = "@evoscientist/webui@latest"
+# Front-end checkout: the git submodule added at the repository root.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_WEBUI_DIR = _REPO_ROOT / "WebUI"
+_WEBUI_LAUNCHER = _WEBUI_DIR / "bin" / "evoscientist-webui.mjs"
+_WEBUI_SERVER = _WEBUI_DIR / "dist" / "server.js"
 _DEFAULT_WEBUI_PORT = 4716
 _DEFAULT_WEBUI_HOST = "127.0.0.1"
+
+
+def _webui_source_ready() -> bool:
+    """Return True when the submodule launcher and built server both exist."""
+    return _WEBUI_LAUNCHER.is_file() and _WEBUI_SERVER.is_file()
 
 
 def run_webui(config: Any, workspace_dir: str | None = None) -> None:
@@ -104,7 +111,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             )
             raise typer.Exit(1)
     if webui_port == backend_port:
-        # Same port → the backend would claim it first and npx would fail to
+        # Same port → the backend would claim it first and the WebUI would fail to
         # bind. Catch it here with a clear message instead of a cryptic error.
         console.print(
             f"[red]WebUI port and langgraph dev port must differ "
@@ -116,20 +123,35 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         )
         raise typer.Exit(1)
 
-    # 3. Pre-flight the npx front-end requirement BEFORE starting the server,
+    # 3. Pre-flight the front-end source requirement BEFORE starting the server,
     # so a missing Node toolchain fails fast with actionable guidance.
-    npx = shutil.which("npx")
-    if not npx:
+    node = shutil.which("node")
+    if not node:
         console.print(
             Panel(
                 Text.from_markup(
-                    "[bold]Node.js / npx was not found on PATH.[/bold]\n\n"
-                    "The WebUI front-end ships as the npm package "
-                    "[cyan]@evoscientist/webui[/cyan] and is launched with "
-                    "[bold]npx[/bold].\n\n"
-                    "Install [bold]Node.js 24 LTS[/bold] (which includes npx), "
+                    "[bold]Node.js was not found on PATH.[/bold]\n\n"
+                    "The WebUI front-end is launched with [bold]node[/bold].\n\n"
+                    "Install [bold]Node.js 24 LTS[/bold], "
                     "then re-run [bold]EvoSci[/bold] — or switch UI modes with "
                     "[bold]EvoSci config set ui_backend tui[/bold]."
+                ),
+                title="[bold red]WebUI unavailable[/bold red]",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(1)
+    if not _webui_source_ready():
+        console.print(
+            Panel(
+                Text.from_markup(
+                    "[bold]WebUI source is not ready.[/bold]\n\n"
+                    "The WebUI is checked out as the git submodule at "
+                    "[cyan]WebUI[/cyan]. Run [bold]./evosci.sh update[/bold] "
+                    "to initialize it, install npm dependencies, and build "
+                    "[cyan]WebUI/dist[/cyan].\n\n"
+                    "If the submodule is missing, run "
+                    "[bold]git submodule update --init --recursive[/bold] first."
                 ),
                 title="[bold red]WebUI unavailable[/bold red]",
                 border_style="red",
@@ -205,12 +227,12 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             f"[bold]EvoSci config set webui_port <port>[/bold].[/yellow]"
         )
 
-    # 5. Launch the front-end via npx in its own process group so the whole
-    # tree (npx → node → next server) tears down cleanly on shutdown. The
-    # package's own launcher prints progress and opens the browser; stdio is
-    # inherited so it all shows in THIS terminal. EVOSCIENTIST_LANGGRAPH_DEV_PORT
-    # lets the UI's config prefill point at our backend automatically. Secrets
-    # are scrubbed — the browser UI never needs LLM provider API keys.
+    # 5. Launch the local WebUI launcher in its own process group so the whole
+    # tree (node → next server) tears down cleanly on shutdown. The launcher
+    # prints progress and opens the browser; stdio is inherited so it all shows
+    # in THIS terminal. EVOSCIENTIST_LANGGRAPH_DEV_PORT lets the UI's config
+    # prefill point at our backend automatically. Secrets are scrubbed — the
+    # browser UI never needs LLM provider API keys.
     #
     # HOSTNAME is the front-end's only bind knob: the package has no --host
     # flag; its launcher forwards `HOSTNAME || "127.0.0.1"` to the Next server.
@@ -242,8 +264,8 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                 f"[dim](opens in your browser)[/dim]\n"
                 f"[bold]Logs:[/bold]     {_shorten(str(RUNTIME.log_file))}\n"
                 f"{remote_backend_hint}\n"
-                f"[dim]Fetching {_WEBUI_PACKAGE} via npx (first run may take a "
-                f"moment)…  Press Ctrl+C to stop.[/dim]"
+                f"[dim]Starting local WebUI from {_shorten(str(_WEBUI_DIR))}…  "
+                f"Press Ctrl+C to stop.[/dim]"
             ),
             title="[bold green]✓ EvoScientist WebUI[/bold green]",
             border_style="green",
@@ -267,16 +289,16 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     if os.name == "posix":
         popen_kwargs["start_new_session"] = True
     elif os.name == "nt":
-        # New process group so the npx → node → next subtree can be killed as a
+        # New process group so the node → next server subtree can be killed as a
         # unit by taskkill /T in _stop_webui.
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     try:
         webui_proc = subprocess.Popen(
-            [npx, "--yes", _WEBUI_PACKAGE, "--port", str(webui_port)],
+            [node, str(_WEBUI_LAUNCHER), "--port", str(webui_port)],
             **popen_kwargs,
         )
     except Exception as exc:
-        console.print(f"[red]Failed to launch WebUI via npx:[/red] {exc}")
+        console.print(f"[red]Failed to launch WebUI source:[/red] {exc}")
         raise typer.Exit(1) from exc
     atexit.register(_stop_webui, webui_proc)
 
@@ -342,8 +364,8 @@ def _scrubbed_env(extra: dict[str, str]) -> dict[str, str]:
 
     The WebUI is a browser client that only talks to the local langgraph server
     — it has no use for LLM provider API keys. Stripping credential-bearing
-    variables keeps them out of the npx-fetched front-end package and its
-    transitive npm dependencies (defence-in-depth, especially with ``@latest``).
+    variables keeps them out of the front-end subprocess and its transitive
+    npm dependencies (defence-in-depth).
     Names are matched loosely (``*_KEY`` / ``*API_KEY*`` / ``*TOKEN*`` /
     ``*SECRET*`` / ``*PASSWORD*``); node/npm essentials (PATH, HOME, NODE_*,
     npm_*, proxies, CA certs) carry none of these and pass through untouched.

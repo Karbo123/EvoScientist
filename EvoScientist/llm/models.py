@@ -18,20 +18,20 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
 
-from langchain.chat_models import init_chat_model
-
 from ..config.settings import (
     OPENROUTER_DEFAULT_APP_CATEGORIES,
     OPENROUTER_DEFAULT_APP_TITLE,
     OPENROUTER_DEFAULT_HTTP_REFERER,
 )
 from .context_window import apply_known_context_window
-from .deepseek import EvoChatDeepSeek
 from .patches import (
     _is_ccproxy_codex,
+    _patch_anthropic_proxy_compat,
     _patch_anthropic_strip_foreign_reasoning,
     _patch_anthropic_structured_output,
+    _patch_ccproxy_codex_compat,
     _patch_ccproxy_system_to_developer,
+    _patch_openai_capture_reasoning_content,
     _patch_openai_compat_content,
     _patch_openrouter_strip_responses_reasoning,
     _patch_openrouter_structured_output,
@@ -55,6 +55,8 @@ _REQUESTY_BASE_URL = "https://router.requesty.ai/v1"
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
 # installed versions are advertised automatically.
 _CODEX_CLIENT_VERSION_FALLBACK = "0.144.1"
+
+init_chat_model: Any | None = None
 
 
 @lru_cache(maxsize=1)
@@ -547,6 +549,8 @@ def get_chat_model(
         >>> model = get_chat_model("gpt-4o")  # OpenAI model
         >>> model = get_chat_model("claude-3-opus-20240229", provider="anthropic")  # Full ID
     """
+    global init_chat_model
+
     model = model or DEFAULT_MODEL
 
     # Look up short name in registry (provider-aware)
@@ -776,6 +780,9 @@ def get_chat_model(
         and _is_deepseek_endpoint(kwargs.get("base_url"))
     )
 
+    if _is_openai_proxy:
+        _patch_ccproxy_codex_compat()
+
     # User-level override for the OpenAI Responses API vs Chat Completions.
     # When "false", force Chat Completions and drop reasoning (which triggers
     # the Responses API path in langchain-openai). Only applies to OpenAI.
@@ -804,8 +811,21 @@ def get_chat_model(
             kwargs["reasoning"] = reasoning
 
     if _uses_native_deepseek:
+        _patch_openai_capture_reasoning_content()
+        from .deepseek import EvoChatDeepSeek
+
         chat_model = EvoChatDeepSeek(model=model_id, **kwargs)
     else:
+        if provider == "anthropic":
+            _patch_anthropic_proxy_compat()
+        if provider in ("openai", "openrouter", "nvidia") or (
+            _original_provider in _OPENAI_ROUTED_PROVIDERS
+        ):
+            _patch_openai_capture_reasoning_content()
+        if init_chat_model is None:
+            from langchain.chat_models import init_chat_model as _init_chat_model
+
+            init_chat_model = _init_chat_model
         chat_model = init_chat_model(model=model_id, model_provider=provider, **kwargs)
 
     # Flatten list content to strings for strict OpenAI-compatible providers

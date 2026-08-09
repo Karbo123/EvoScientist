@@ -1,9 +1,8 @@
 """Tests for ``run_webui`` bind-host wiring.
 
-The front-end is an external npm package (``@evoscientist/webui``) with no
-``--host`` flag: its bin launcher does
+The front-end is the local ``WebUI`` git submodule, whose bin launcher does
 ``HOSTNAME: process.env.HOSTNAME || "127.0.0.1"`` and hands that to the Next
-standalone server. Setting ``HOSTNAME`` on the npx env is therefore the *only*
+standalone server. Setting ``HOSTNAME`` on the node env is therefore the *only*
 supported way to widen the front-end's interface — these tests pin that
 contract so a refactor can't quietly drop it and silently re-narrow the bind.
 """
@@ -107,7 +106,8 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
     monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
     monkeypatch.setattr(webui_mod, "console", _RecordingConsole(captured["printed"]))
     monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/npx")
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/node")
+    monkeypatch.setattr(webui_mod, "_webui_source_ready", lambda: True)
 
     monkeypatch.setattr(
         lgm, "_is_port_occupied", lambda _p, *_a, **_kw: backend_port_occupied

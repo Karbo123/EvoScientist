@@ -4,10 +4,6 @@ from unittest.mock import patch
 
 import pytest
 
-# Side-effect import: applies module-level monkey-patches (e.g.,
-# _patch_openai_capture_reasoning_content) before tests reference patched
-# functions from langchain_openai.
-import EvoScientist.llm.patches  # noqa: F401
 from EvoScientist.llm import (
     DEFAULT_MODEL,
     MODELS,
@@ -17,6 +13,11 @@ from EvoScientist.llm import (
     list_models,
 )
 from EvoScientist.llm.models import _MODEL_ENTRIES
+from EvoScientist.llm.patches import _patch_openai_capture_reasoning_content
+
+# The OpenAI reasoning-content patch is now applied lazily by get_chat_model;
+# apply it here before tests reference the patched langchain_openai functions.
+_patch_openai_capture_reasoning_content()
 
 # =============================================================================
 # Test MODELS registry
@@ -2410,14 +2411,14 @@ class TestDeepseekReasoningPassback:
 
 
 # =============================================================================
-# Test _patch_openai_capture_reasoning_content (module-level monkey-patch)
+# Test _patch_openai_capture_reasoning_content (lazy monkey-patch)
 # =============================================================================
 
 
 class TestPatchOpenAICaptureReasoningContent:
     """Verify reasoning_content is captured into AIMessage.additional_kwargs.
 
-    This patch is applied at import time and globally affects langchain-openai's
+    This patch is applied on first use and globally affects langchain-openai's
     _convert_dict_to_message and _convert_delta_to_message_chunk.
     """
 

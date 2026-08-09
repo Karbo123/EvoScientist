@@ -8,7 +8,9 @@ only pay their cost when someone actually touches those names.
 
 from __future__ import annotations
 
-from .. import deploy as _deploy_pkg  # noqa: F401 — registers `deploy` @app.command
+from ..deploy import (
+    server as _deploy_server,  # noqa: F401 — registers `deploy` @app.command
+)
 from . import commands  # noqa: F401 — registers @app.command decorators
 from ._app import app
 

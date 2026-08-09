@@ -1062,7 +1062,7 @@ async def get_thread_metadata(thread_id: str) -> dict | None:
             }
 
 
-async def get_thread_messages(thread_id: str) -> list:
+async def get_thread_messages(thread_id: str, db_path: str | None = None) -> list:
     """Return the list of LangChain message objects for *thread_id*.
 
     Only returns messages for EvoScientist threads.
@@ -1073,7 +1073,7 @@ async def get_thread_messages(thread_id: str) -> list:
     ``DeltaChannel`` where messages live in the ``writes`` table rather
     than the latest checkpoint's ``channel_values``.
     """
-    db_path = str(get_db_path())
+    db_path = db_path or str(get_db_path())
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return []
@@ -1445,6 +1445,23 @@ async def _api_workspace_dir_async() -> str:
     return await asyncio.to_thread(_api_workspace_dir)
 
 
+def _same_workspace_path(left: str, right: str) -> bool:
+    """Return True when two workspace paths refer to the same directory.
+
+    WSL's drvfs mounts are case-insensitive but the paths are compared as
+    strings, so ``/mnt/d/evoscientist`` and ``/mnt/d/EvoScientist`` can refer
+    to the same directory while still failing a plain equality check.
+    """
+    import os
+
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.normcase(
+            str(Path(left).expanduser().resolve())
+        ) == os.path.normcase(str(Path(right).expanduser().resolve()))
+
+
 class _ApiPruningCheckpointer(PruningCheckpointer):
     """``PruningCheckpointer`` that stamps CLI-compatible ownership metadata.
 
@@ -1495,6 +1512,17 @@ async def _purge_internal_worker_threads() -> None:
         db_path = str(get_db_path())
         async with aiosqlite.connect(db_path, timeout=30.0) as conn:
             if not await _table_exists(conn, "checkpoints"):
+                return
+            # The covering index makes this a tiny index lookup. Avoid the
+            # full-table DELETE scan when there are no worker rows to purge.
+            cur = await conn.execute(
+                """
+                SELECT 1 FROM checkpoints
+                WHERE json_extract(metadata, '$.graph_id') LIKE 'evomemory-%'
+                LIMIT 1
+                """
+            )
+            if not await cur.fetchone():
                 return
             if await _table_exists(conn, "writes"):
                 await conn.execute(
@@ -1635,7 +1663,11 @@ async def _restore_webui_threads_to_global_store() -> bool:
                     restored_graph_id = AGENT_NAME
                 if restored_graph_id is None:
                     continue
-                if not workspace_dir or workspace_dir != current_workspace:
+                if not workspace_dir:
+                    continue
+                if not await asyncio.to_thread(
+                    _same_workspace_path, workspace_dir, current_workspace
+                ):
                     continue
                 sqlite_data[thread_uuid] = _RestoredThreadInfo(
                     updated_at=updated_at,
@@ -1862,6 +1894,23 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
         str(get_db_path()), keep_per_ns=keep
     ) as saver:
         await saver.setup()
+        # Covering index keeps startup metadata scans off the multi-MB
+        # checkpoint blobs; purge/restore previously read the whole DB.
+        await saver.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_checkpoints_meta_cover
+            ON checkpoints (
+                thread_id,
+                json_extract(metadata, '$.graph_id'),
+                json_extract(metadata, '$.updated_at'),
+                json_extract(metadata, '$.assistant_id'),
+                json_extract(metadata, '$.workspace_dir'),
+                json_extract(metadata, '$.model'),
+                json_extract(metadata, '$.agent_name')
+            )
+            """
+        )
+        await saver.conn.commit()
         await _purge_internal_worker_threads()
         if await _restore_webui_threads_to_global_store():
             await _sweep_orphaned_runs_in_global_store()

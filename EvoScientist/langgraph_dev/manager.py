@@ -32,6 +32,7 @@ from EvoScientist.config import (
     EvoScientistConfig,
     MemoryControls,
     MemoryObservationTarget,
+    get_config_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,7 @@ class LanggraphRuntimePaths:
 # ``~/.config/evoscientist/`` layout; tests override ``RUNTIME`` with
 # :meth:`LanggraphRuntimePaths.for_directory` to point at a temp dir
 # without touching the user's real home directory.
-DEFAULT_PID_DIR = Path.home() / ".config" / "evoscientist"
+DEFAULT_PID_DIR = get_config_dir()
 RUNTIME: LanggraphRuntimePaths = LanggraphRuntimePaths.for_directory(DEFAULT_PID_DIR)
 
 
@@ -282,7 +283,14 @@ def _unlink_workspace_sidecar() -> None:
 # healthy server and reuses it. ``threading.RLock`` is process-local and
 # can't coordinate across CLI invocations.
 # Lock path lives on ``RUNTIME.lock_file``; timeout stays module-level.
-_FILE_LOCK_TIMEOUT = 120.0  # 60s cold-start health-check + buffer
+# Cold-start on /mnt/d (drvfs) can take much longer than the upstream 60s
+# budget, especially on the first import. Keep this in sync with
+# _LANGGRAPH_DEV_STARTUP_TIMEOUT below.
+_FILE_LOCK_TIMEOUT = 240.0
+
+# langgraph dev cold-start budget. The upstream default of 60s is too short
+# for WSL2 + /mnt/d where Python imports can take 90-180s on first run.
+_LANGGRAPH_DEV_STARTUP_TIMEOUT = 180.0
 
 # Module-level handle to the langgraph dev subprocess we started, if any.
 # Stays None when we reused an existing process (managed by the user).
@@ -427,6 +435,12 @@ def _can_bind_port(port: int, host: str = _DEFAULT_HOST) -> bool:
     family = _socket.AF_INET6 if ":" in host else _socket.AF_INET
     s = _socket.socket(family, _socket.SOCK_STREAM)
     try:
+        # Match normal server behavior: stale FIN-WAIT/TIME_WAIT sockets from
+        # killed long-lived connections must not block a fresh listener.
+        try:
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        except (AttributeError, OSError):
+            pass
         s.bind((host, port))
         return True
     except OSError:
@@ -800,6 +814,9 @@ def start_langgraph_dev(
                 str(jobs_per_worker),
                 "--no-browser",
                 "--no-reload",
+                # The lazy graph factories build filesystem/MCP backends on
+                # first request; blockbuster would otherwise 500 those builds.
+                "--allow-blocking",
                 *(["--tunnel"] if tunnel else []),
             ],
             cwd=str(workspace_dir),
@@ -822,9 +839,9 @@ def start_langgraph_dev(
     _PROCESS_WORKSPACE = workspace_dir
 
     # langgraph dev cold-starts in ~10-15s normally; first-time npx-based MCP
-    # servers can push this to 30-60s while npm fetches packages, so the budget
-    # is generous. Subsequent runs are much faster thanks to npm cache.
-    deadline = time.monotonic() + 60
+    # servers can push this to 30-60s while npm fetches packages. WSL2 +
+    # /mnt/d can take even longer, so use the module-level budget above.
+    deadline = time.monotonic() + _LANGGRAPH_DEV_STARTUP_TIMEOUT
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             tail = ""
@@ -855,7 +872,9 @@ def start_langgraph_dev(
 
     stop_langgraph_dev(proc)
     raise RuntimeError(
-        f"langgraph dev did not become healthy within 60 seconds. Check {RUNTIME.log_file}"
+        f"langgraph dev did not become healthy within "
+        f"{_LANGGRAPH_DEV_STARTUP_TIMEOUT:.0f} seconds. "
+        f"Check {RUNTIME.log_file}"
     )
 
 

@@ -260,16 +260,17 @@ def test_agent_uses_filtered_graph_class():
         _EvoFilteredGraph,
     )
 
-    assert isinstance(EvoScientist_agent, _EvoFilteredGraph)
-    assert isinstance(EvoScientist_agent.copy(update={}), _EvoFilteredGraph)
+    agent = EvoScientist_agent()
+    assert isinstance(agent, _EvoFilteredGraph)
+    assert isinstance(agent.copy(update={}), _EvoFilteredGraph)
 
 
 def test_all_registered_graphs_use_filtered_graph_class():
     """Every graph registered in ``langgraph.json`` (main + all subagents)
-    gets the ``__class__`` swap via ``_apply_filter_to_all_registered_graphs``.
-    Iterating the config directly matches the auto-detect refactor: adding
-    a new subagent to ``langgraph.json`` should not require a corresponding
-    test update.
+    is exposed as a lazy factory; building each graph applies the
+    ``__class__`` swap via ``_apply_filter_to_graph``. Iterating the config
+    directly means adding a new subagent to ``langgraph.json`` does not
+    require a corresponding test update.
 
     Subagents get ``create_code_interpreter_middleware`` unconditionally
     (``EvoScientist.py:_build_middleware_stack``), so they can touch the
@@ -283,15 +284,17 @@ def test_all_registered_graphs_use_filtered_graph_class():
     from importlib import import_module
     from pathlib import Path
 
-    # Import triggers ``main_graph``'s swap loop.
     from EvoScientist.langgraph_dev import main_graph
-    from EvoScientist.langgraph_dev.main_graph import _EvoFilteredGraph
 
     config_path = Path(main_graph.__file__).parent / "langgraph.json"
     config = json.loads(config_path.read_text())
     for name, path in config["graphs"].items():
         module_path, attr = path.rsplit(":", 1)
-        graph = getattr(import_module(module_path), attr)
+        factory = getattr(import_module(module_path), attr)
+        assert callable(factory), f"graph {name!r} ({path}) is not a lazy factory"
+        graph = factory()
+        from EvoScientist.langgraph_dev.main_graph import _EvoFilteredGraph
+
         assert isinstance(graph, _EvoFilteredGraph), (
             f"graph {name!r} ({path}) did not receive the class swap"
         )

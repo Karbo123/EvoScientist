@@ -9,8 +9,8 @@ Patches:
     - _patch_ccproxy_codex_compat: ccproxy model fixes + langchain None guard
     - _patch_ccproxy_system_to_developer: system→developer role for ccproxy
     - _patch_openai_capture_reasoning_content: capture provider
-      reasoning_content into AIMessage.additional_kwargs (module-level,
-      applied at import)
+      reasoning_content into AIMessage.additional_kwargs (lazy, applied on
+      first model call)
     - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
       encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
       (store=false → "Item with id rs_... not found")
@@ -36,14 +36,19 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage
 
-
 # ---------------------------------------------------------------------------
 # Patch: langchain-anthropic (>=1.3.4) calls .model_dump() on
 # context_management / container objects returned by the Anthropic SDK.
 # Proxies like ccproxy may return plain dicts which lack that method.
 # We wrap the class method to pre-convert dicts before the original runs.
 # ---------------------------------------------------------------------------
+_anthropic_proxy_compat_patched = False
+
+
 def _patch_anthropic_proxy_compat() -> None:
+    global _anthropic_proxy_compat_patched
+    if _anthropic_proxy_compat_patched:
+        return
     try:
         import types as _types
 
@@ -70,11 +75,9 @@ def _patch_anthropic_proxy_compat() -> None:
             return _orig(self, event, *args, **kwargs)
 
         _CA._make_message_chunk_from_anthropic_event = _safe
+        _anthropic_proxy_compat_patched = True
     except Exception:
         pass
-
-
-_patch_anthropic_proxy_compat()
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +90,14 @@ _patch_anthropic_proxy_compat()
 # 3) langchain-openai iterates response.output which can be None after the
 #    proxy strips it.  Fix: guard in _construct_lc_result_from_responses_api.
 # ---------------------------------------------------------------------------
+_ccproxy_codex_compat_patched = False
+
+
 def _patch_ccproxy_codex_compat() -> None:
     """Patch ccproxy-api models for Responses API compatibility."""
+    global _ccproxy_codex_compat_patched
+    if _ccproxy_codex_compat_patched:
+        return
     # 1) Make ResponseObject.output optional (default=[])
     try:
         import ccproxy.llms.models.openai as _oai_mod
@@ -179,8 +188,7 @@ def _patch_ccproxy_codex_compat() -> None:
     except Exception:
         pass
 
-
-_patch_ccproxy_codex_compat()
+    _ccproxy_codex_compat_patched = True
 
 
 # ---------------------------------------------------------------------------
@@ -724,7 +732,7 @@ def _patch_ccproxy_system_to_developer(model: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Patch (module-level): langchain-openai's _convert_dict_to_message and
+# Patch (lazy): langchain-openai's _convert_dict_to_message and
 # _convert_delta_to_message_chunk discard provider-specific fields like
 # `reasoning_content`. We monkey-patch them to capture reasoning_content
 # into AIMessage.additional_kwargs so downstream code (incl. our passback
@@ -768,9 +776,6 @@ def _patch_openai_capture_reasoning_content() -> None:
         _openai_capture_patched = True
     except Exception:
         pass
-
-
-_patch_openai_capture_reasoning_content()
 
 
 # ---------------------------------------------------------------------------

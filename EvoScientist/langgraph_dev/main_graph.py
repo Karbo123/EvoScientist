@@ -4,12 +4,13 @@ The main ``EvoScientist_agent`` is exposed via ``__getattr__`` lazy loading
 in ``EvoScientist/EvoScientist.py`` so it doesn't construct on plain
 ``import EvoScientist``. ``langgraph dev`` 's symbol resolver inspects
 module attributes directly and doesn't trigger ``__getattr__``, so we
-re-export here to make it visible.
+define a lazy factory here to make it visible.
 
-Before re-export we upgrade the compiled graph's class in place to
-``_EvoFilteredGraph``, which strips ``PrivateStateAttr``-marked fields
-(currently just ``_quickjs_snapshot_payload``) from ``get_state`` /
-``get_state_history`` responses. Upstream ``langchain_quickjs`` annotates
+When the lazy factory builds the graph, we upgrade the compiled graph's
+class in place to ``_EvoFilteredGraph``, which strips
+``PrivateStateAttr``-marked fields (currently just
+``_quickjs_snapshot_payload``) from ``get_state`` / ``get_state_history``
+responses. Upstream ``langchain_quickjs`` annotates
 the field ``PrivateStateAttr = OmitFromSchema(input=True, output=True)``,
 but LangGraph's ``_prepare_state_snapshot`` doesn't honor that on
 checkpoint reads — every ``getState`` materializes the delta chain back
@@ -20,8 +21,6 @@ cross-turn REPL persistence as ``langchain-ai/deepagents#3064`` shipped it.
 
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import PregelTask, StateSnapshot
-
-from EvoScientist.EvoScientist import EvoScientist_agent as _agent
 
 _PRIVATE_STATE_FIELDS = frozenset({"_quickjs_snapshot_payload"})
 
@@ -182,67 +181,26 @@ class _EvoFilteredGraph(CompiledStateGraph):
             yield _strip_private(snap)
 
 
-# In-place ``__class__`` swap: the subclass adds only methods (no new
-# instance attributes) so the memory layout is identical and the swap is
-# safe. Constructing a fresh ``_EvoFilteredGraph`` via ``.copy()`` would
-# require reproducing the deep-agent build pipeline; the swap avoids that.
-_agent.__class__ = _EvoFilteredGraph
-EvoScientist_agent = _agent
+_main_agent: CompiledStateGraph | None = None
 
 
-def _apply_filter_to_all_registered_graphs() -> None:
-    """Extend the class swap to every graph registered in ``langgraph.json``.
-
-    ``EvoScientist.py:_build_middleware_stack`` installs
-    ``create_code_interpreter_middleware`` unconditionally — it's not gated
-    on the ``for_async_subagent`` flag — so every subagent (sync ``task``
-    dispatch and async ``start_async_task``) carries the QuickJS REPL and
-    can produce ``_quickjs_snapshot_payload`` writes on its own checkpoint
-    namespace.
-
-    Async subagents get their own ``thread_id`` and their ``/threads/{id}/state``
-    endpoint is served by their own compiled graph. Without swapping the
-    class on those graphs, the filter we applied to ``EvoScientist_agent``
-    doesn't reach that endpoint and any real code_interpreter touch inside
-    a subagent leaks the anchor snapshot verbatim.
-
-    Reads the graph registry straight from ``langgraph.json`` so a new
-    subagent added to the config picks up the swap automatically — no
-    hardcoded list to keep in sync.
-
-    Idempotent (skips graphs already swapped) and safe on graphs that don't
-    use the middleware — ``_strip_private`` returns snapshots unchanged when
-    the private field is absent. Best-effort: if the config is unreadable
-    or an entry can't be resolved, the deployment still starts — only the
-    unresolvable subagents remain unfiltered.
-    """
-    import json
-    from importlib import import_module
-    from pathlib import Path
-
-    config_path = Path(__file__).parent / "langgraph.json"
-    try:
-        config = json.loads(config_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-
-    for path in config.get("graphs", {}).values():
-        # Format: "module.dotted.path:attr_name"
-        if ":" not in path:
-            continue
-        module_path, attr = path.rsplit(":", 1)
-        try:
-            module = import_module(module_path)
-        except ImportError:
-            continue
-        graph = getattr(module, attr, None)
-        if isinstance(graph, CompiledStateGraph) and not isinstance(
-            graph, _EvoFilteredGraph
-        ):
-            graph.__class__ = _EvoFilteredGraph
+def _apply_filter_to_graph(graph):
+    """Upgrade a compiled graph in place to ``_EvoFilteredGraph``."""
+    if isinstance(graph, CompiledStateGraph) and not isinstance(
+        graph, _EvoFilteredGraph
+    ):
+        graph.__class__ = _EvoFilteredGraph
+    return graph
 
 
-_apply_filter_to_all_registered_graphs()
+def EvoScientist_agent():
+    """Return the lazily-built main agent graph, cached after first build."""
+    global _main_agent
+    if _main_agent is None:
+        from EvoScientist.EvoScientist import EvoScientist_agent as built_agent
+
+        _main_agent = _apply_filter_to_graph(built_agent)
+    return _main_agent
 
 
 __all__ = ["EvoScientist_agent"]
